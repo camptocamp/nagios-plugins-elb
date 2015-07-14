@@ -1,0 +1,187 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import argparse
+import boto3
+import re
+import sys
+
+class elb_policies:
+    def __init__(self, **kwargs):
+        self.__debug = kwargs['debug']
+        self.__expr = kwargs['expr']
+        self.__matcher = re.compile(self.__expr)
+        self.__dry_run = kwargs['dry_run']
+        
+
+        session = boto3.session.Session(profile_name=kwargs['profile'], region_name=kwargs['region'])
+        self.__client = session.client('elb')
+        self.__many_policies = []
+        self.__old_policies = []
+        self.__last_policy = ''
+        self.__last_policy_content = ''
+        self.__policy_name = ''
+
+    def __print(self, string, level=1):
+        '''
+        Simple "print" wrapper: send to stdout if debug is > 0
+        '''
+        if level <= self.__debug:
+            print string
+
+    def get_policies(self):
+        '''
+        Get existing policies, and pick latest name
+        '''
+        self.__print('Getting latest policy', 2)
+        policies = self.__client.describe_load_balancer_policies()
+        self.__last_policy_content = policies['PolicyDescriptions'][0]
+        self.__last_policy = policies['PolicyDescriptions'][0]['PolicyName']
+        self.__policy_name = 'SSLNegotiationPolicy-%s' % (self.__last_policy)
+        self.__print('  Latest policy seems to be: %s'%self.__last_policy, 1)
+
+    def __duplicate_policy(self, loadbalancer):
+        '''
+        As old ELBs don't seem to have any knowledge of new Policies, we need
+        to duplicate them — this method takes latest Policy content and just create,
+        for given ELB, the right policy.
+        '''
+        self.__print('    Create %s' % self.__policy_name, 1)
+        self.__client.create_load_balancer_policy(
+                LoadBalancerName = loadbalancer,
+                PolicyName       = self.__policy_name,
+                PolicyTypeName   = self.__last_policy_content['PolicyTypeName'],
+                PolicyAttributes = self.__last_policy_content['PolicyAttributeDescriptions'],
+                )
+
+    def get_elbs(self):
+        '''
+        Get all ELBs, pick those with Policies, and dig in OtherPolicies
+        '''
+        self.__print('Getting ELB list', 2)
+        loadbalancers = self.__client.describe_load_balancers()
+        for loadbalancer in loadbalancers['LoadBalancerDescriptions']:
+            if self.__expr == 'all' or self.__matcher.search(loadbalancer['LoadBalancerName']):
+                for listener in loadbalancer['ListenerDescriptions']:
+                    if listener['Listener']['LoadBalancerPort'] == 443:
+                        if len(listener['PolicyNames']) > 0:
+                            self.__print('  Found ELB: %s'%loadbalancer['LoadBalancerName'], 1)
+                            if len(listener['PolicyNames']) == 1:
+                                if listener['PolicyNames'][0] != self.__policy_name:
+                                    self.__old_policies.append(loadbalancer)
+                                    self.__print('      OLD policy in place!', 1)
+                                    self.__print('      Currently using %s'%listener['PolicyNames'][0], 2)
+                            else:
+                                if self.__policy_name not in listener['PolicyNames']:
+                                    self.__print('      %i policies in place!'%len(listener['PolicyNames']), 1)
+                                    if self.__debug > 1:
+                                        for p in listener['PolicyNames']:
+                                            self.__print('        %s'%p, 2)
+                                    self.__many_policies.append(loadbalancer)
+
+    def clean_elbs(self):
+        '''
+        Loop in ELBs lists, add latest policy, remove all others
+        '''
+
+        if len(self.__old_policies) > 0:
+            self.__print('Will now update ELBs with just one old policy', 2)
+            for elb in self.__old_policies:
+                if self.__expr == 'all' or self.__matcher.search(elb['LoadBalancerName']):
+                    self.__print('  Update: %s'%elb['LoadBalancerName'], 1)
+                    if not self.__dry_run:
+                        self.__duplicate_policy(elb['LoadBalancerName'])
+                        self.__client.set_load_balancer_policies_of_listener(
+                                LoadBalancerName=elb['LoadBalancerName'],
+                                LoadBalancerPort=443,
+                                PolicyNames=[self.__policy_name]
+                                )
+                    else:
+                        self.__print('    Would have created and applied %s'%self.__last_policy, 1)
+
+        matcher = re.compile('(ELBSecurityPolicy|SSLNegotiationPolicy)')
+
+        if len(self.__many_policies) > 0:
+            self.__print('Will now update ELBs with multiple policies', 2)
+            for elb in self.__many_policies:
+                if self.__expr == 'all' or self.__matcher.search(elb['LoadBalancerName']):
+                    self.__print('  Update: %s'%elb['LoadBalancerName'], 1)
+                    self.__print('    Get non-SSL related policies', 2)
+                    port_policies = filter(self.__get_ssl_port, elb['ListenerDescriptions'])[0]['PolicyNames']
+                    non_ssl = filter(self.__get_non_ssl_policies, port_policies)
+                    non_ssl.append(self.__policy_name)
+                    if not self.__dry_run:
+                        self.__duplicate_policy(elb['LoadBalancerName'])
+                        self.__client.set_load_balancer_policies_of_listener(
+                                LoadBalancerName=elb['LoadBalancerName'],
+                                LoadBalancerPort=443,
+                                PolicyNames=non_ssl
+                                )
+                    else:
+                        self.__print('    Would have created %s'% self.__policy_name, 1)
+                        self.__print('    Would have applied %s'% ', '.join(non_ssl), 1)
+
+        if len(self.__old_policies+self.__many_policies) > 0:
+            self.__print('Will now clean up ELBs policies', 2)
+            for elb in self.__old_policies+self.__many_policies:
+                if self.__expr == 'all' or self.__matcher.search(elb['LoadBalancerName']):
+                    for policy in elb['Policies']['OtherPolicies']:
+                        if policy != self.__policy_name and matcher.search(policy):
+                            if not self.__dry_run:
+                                self.__print('Deleteting %s from %s'%(policy, elb['LoadBalancerName']), 1)
+                                self.__client.delete_load_balancer_policy(
+                                        LoadBalancerName=elb['LoadBalancerName'],
+                                        PolicyName=policy
+                                        )
+                            else:
+                                self.__print('Would have deleted %s from %s'%(policy, elb['LoadBalancerName']), 1)
+            
+
+    def __get_ssl_port(self, listener):
+        return listener['Listener']['LoadBalancerPort'] == 443
+
+    def __get_non_ssl_policies(self, policy):
+        return not re.search('ELBSecurityPolicy|SSLNegotiationPolicy', policy)
+
+    def nagios_status(self):
+        if len(self.__many_policies) > 0 or len(self.__old_policies) > 0:
+            print '''ELBs SSL policies aren't consistent!'''
+            sys.exit(2)
+        else:
+            print 'ELBs SSL policies are up to date'
+            sys.exit(0)
+
+    def get_policy_diff(self):
+        '''
+        TODO: will display policy diff if we want to
+        '''
+        pass
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Ensure ELBs have latest policy available for SSL.')
+    parser.add_argument('--apply',  action='store_const', const=True,        help='Apply script to all ELBs')
+    parser.add_argument('--debug',  '-d',   help='Set verbosity level', default=0, type=int)
+    parser.add_argument('--dry-run', '-n', action='store_const', const=True, help='Allow to see what would have been done')
+    parser.add_argument('--expr', '-l',     help='Set any expression in order to get a specific ELB(s)', default='all')
+    parser.add_argument('--nagios', action='store_const', const=True,        help='Returns nagios-compatible status')
+    parser.add_argument('--profile', '-p', help='Pass AWS profile name', default='default')
+    parser.add_argument('--region', '-r',   help='Set AWS region', default='eu-west-1')
+    args = parser.parse_args()
+
+    if args.apply and args.nagios:
+        print 'ERROR: cannot apply and return nagios status at the same time!'
+        sys.exit(99)
+
+    worker = elb_policies(
+        expr=args.expr,
+        debug=args.debug,
+        dry_run=args.dry_run,
+        profile=args.profile,
+        region=args.region,
+        )
+    worker.get_policies()
+    worker.get_elbs()
+    if args.apply or args.dry_run:
+        worker.clean_elbs()
+    if args.nagios:
+        worker.nagios_status()
