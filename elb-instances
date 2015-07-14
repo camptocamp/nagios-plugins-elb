@@ -1,0 +1,147 @@
+#!/usr/bin/env python
+
+import argparse
+import boto3
+import sys
+
+class elb_instances:
+    def __init__(self, **kwargs):
+        self.__debug = kwargs['debug']
+        self.__elb = kwargs['load_balancer_name']
+        
+        session = boto3.session.Session(
+                profile_name=kwargs['profile'],
+                region_name=kwargs['region']
+                )
+
+        self.__elb_client = session.client('elb')
+        self.__ec2_client = session.client('ec2')
+
+        self.__elbs = {}
+        self.__instances = {}
+
+        self.out_status = 0
+        self.out_msg = 'ELB: in good state'
+
+        self.get_elbs()
+        self.get_instances()
+        self.compare_zones()
+
+
+    def __print(self, string, level=1):
+        '''
+        Simple "print" wrapper: sends to stdout if debug is > 0
+        '''
+        if level <= self.__debug:
+            print string
+
+    def get_instances(self):
+        '''
+        Get all instances in order to compare with ELBs.
+        We get all instances in order to avoid AWS API limits.
+        '''
+        instances = self.__ec2_client.describe_instances()
+        for reservation in instances['Reservations']:
+            for instance in reservation['Instances']:
+                self.__print(
+                        'Instance: %s, AZ: %s' % (
+                            instance['InstanceId'],
+                            instance['Placement']['AvailabilityZone']
+                            ),
+                        2
+                        )
+                self.__instances[instance['InstanceId']] = {
+                    'availability': instance['Placement']['AvailabilityZone'],
+                    }
+
+    def get_elbs(self):
+        '''
+        Either get all ELBs or just one, depending on script invocation.
+        '''
+        if self.__elb == 'all':
+            self.__print('Getting all ELBs')
+            lbs = self.__elb_client.describe_load_balancers()
+        else:
+            self.__print('Getting only %s' % self.__elb)
+            lbs = self.__elb_client.describe_load_balancers(
+                    LoadBalancerNames = [self.__elb]
+                    )
+
+        for lb in lbs['LoadBalancerDescriptions']:
+            self.__print(
+                    'ELB name: %s, AZ: %s' % (
+                        lb['LoadBalancerName'], ', '.join(lb['AvailabilityZones'])
+                        ),
+                    2
+                    )
+            attributes = self.__elb_client.describe_load_balancer_attributes(
+                    LoadBalancerName = lb['LoadBalancerName']
+                    )
+            instance_health = self.__elb_client.describe_instance_health(
+                    LoadBalancerName = lb['LoadBalancerName']
+                    )
+            health = {}
+            for ih in instance_health['InstanceStates']:
+                health[ih['InstanceId']] = ih['State']
+            self.__elbs[lb['LoadBalancerName']] = {
+                    'availability': lb['AvailabilityZones'],
+                    'cross': attributes['LoadBalancerAttributes']['CrossZoneLoadBalancing']['Enabled'],
+                    'health': health,
+                    }
+
+    def compare_zones(self):
+        '''
+        Get ELBs activated AZ, and check each of them has at least one instance.
+        Also ensure instances are properly working.
+        '''
+        for elb in self.__elbs:
+            if len(self.__elbs[elb]['health']) > 0:
+                for instance in self.__elbs[elb]['health']:
+                    if self.__instances[instance]['availability'] not in self.__elbs[elb]['availability']:
+                        self.__print(
+                                'Instance %s (%s) not in activated AZ for %s (%s)' %(
+                                    instance, self.__instances[instance]['availability'], elb, ', '.join(self.__elbs[elb]['availability'])
+                                    ),
+                                1
+                                )
+                        if self.out_status == 0:
+                            self.out_status = 1
+                            self.out_msg = 'At least one instance not in use'
+                    else:
+                        if self.__elbs[elb]['health'][instance] == 'InService':
+                            self.__print(
+                                    'Found %s for %s, state: %s' % (
+                                        instance, elb, 'InService'
+                                        ),
+                                    2
+                                    )
+                        else:
+                            self.__print(
+                                    'Found %s for %s, state: %s' % (
+                                        instance, elb, self.__elbs[elb]['health'][instance]
+                                        ),
+                                    1
+                                    )
+                            self.out_status = 2
+                            self.out_msg = 'At least one instance out of ELB'
+            else:
+                self.out_status = 2
+                self.out_msg = 'At least one ELB has no instance'
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Check attached instances for each (or given) ELB')
+    parser.add_argument('--debug',  '-d',   help='Set verbosity level', default=0, type=int)
+    parser.add_argument('--load-balancer-name', '-e',   help='Check only this ELB', default='all')
+    parser.add_argument('--profile', '-p', help='Pass AWS profile name', default='default')
+    parser.add_argument('--region', '-r',   help='Set AWS region', default='eu-west-1')
+    args = parser.parse_args()
+
+    worker = elb_instances(
+            debug = args.debug,
+            load_balancer_name = args.load_balancer_name,
+            profile = args.profile,
+            region = args.region,
+            )
+    print worker.out_msg
+    sys.exit(worker.out_status)
