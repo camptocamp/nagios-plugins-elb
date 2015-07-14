@@ -9,7 +9,8 @@ This repository contains a set of nagios plugins for AWS Elastic LoadBalancer se
 Usage
 -----
 
-* Create a dedicated key pair via AWS IAM
+* Install python-boto3
+* Create a dedicated key pair via AWS IAM (read-only access for EC2 and ELB)
 * Put this key pair in nagios home .aws/config file
 * Launch the scripts with --help for more help
 
