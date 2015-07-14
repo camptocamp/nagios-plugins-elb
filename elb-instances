@@ -40,6 +40,7 @@ class elb_instances:
         Get all instances in order to compare with ELBs.
         We get all instances in order to avoid AWS API limits.
         '''
+        self.__print('Getting all instances')
         instances = self.__ec2_client.describe_instances()
         for reservation in instances['Reservations']:
             for instance in reservation['Instances']:
@@ -125,6 +126,7 @@ class elb_instances:
                             self.out_status = 2
                             self.out_msg = 'At least one instance out of ELB'
             else:
+                self.__print('ELB %s has no instance'%elb, 1)
                 self.out_status = 2
                 self.out_msg = 'At least one ELB has no instance'
 
