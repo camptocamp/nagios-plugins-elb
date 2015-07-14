@@ -28,7 +28,7 @@ region = eu-west-1
 License
 -------
 
-Copyright (c) Camptocamp 2014 All rights reserved.
+Copyright (c) Camptocamp 2015 All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
