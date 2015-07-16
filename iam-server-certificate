@@ -1,0 +1,146 @@
+#!/usr/bin/env python
+
+import argparse
+import boto3
+import re
+import sys
+
+class iam_server_certificate:
+    def __init__(self, **kwargs):
+
+        self.__apply   = kwargs['apply']
+        self.__debug   = kwargs['debug']
+        self.__dry_run = kwargs['dry_run']
+        self.__expr    = kwargs['expr']
+        self.__nagios  = kwargs['nagios']
+
+        self.__matcher = re.compile(self.__expr, flags=re.I)
+
+        session = boto3.session.Session(profile_name=kwargs['profile'], region_name=kwargs['region'])
+        self.__iam_client = session.client('iam')
+        self.__elb_client = session.client('elb')
+
+        self.__iam_certificates = {}
+        self.__elbs = {}
+
+        self.__get_certificates()
+        self.__get_elbs()
+
+        self.__expose_unused()
+        pass
+
+    def __print(self, string, level=1):
+        '''
+        Simple "print" wrapper: send to stdout if debug is > 0
+        '''
+        if level <= self.__debug:
+            print string
+
+    def __get_certificates(self):
+        '''
+        Extract certificate names and ARN from IAM
+        '''
+        self.__print('Getting server certificates', 2)
+        certificates = self.__iam_client.list_server_certificates()
+        for certificate in certificates['ServerCertificateMetadataList']:
+            if (self.__expr != 'all' and self.__matcher.search(certificate['ServerCertificateName'])) or self.__expr == 'all':
+                self.__iam_certificates[certificate['ServerCertificateName']] = certificate['Arn']
+                self.__print(
+                        'Certificate found: %s,\n  ARN: %s' %(
+                            certificate['ServerCertificateName'],
+                            certificate['Arn']
+                        ),
+                        2
+                        )
+
+    def __get_elbs(self):
+        '''
+        Get all ELBs and extract their SSL listener information
+        '''
+        elbs = self.__elb_client.describe_load_balancers()
+
+        for lb in elbs['LoadBalancerDescriptions']:
+            for listener in lb['ListenerDescriptions']:
+                if listener['Listener']['Protocol'] == 'HTTPS':
+                    if (self.__expr != 'all' and self.__matcher.search(listener['Listener']['SSLCertificateId'])) or self.__expr == 'all':
+                        self.__print(
+                                'ELB: %s,\n  Certificate: %s' % (
+                                    lb['LoadBalancerName'],
+                                    listener['Listener']['SSLCertificateId']
+                                    ),
+                                2
+                                )
+                        self.__elbs[lb['LoadBalancerName']] = listener['Listener']['SSLCertificateId']
+
+    def __extract_cert_name(self, string):
+        return string.split('/')[1]
+
+    def __expose_unused(self):
+        '''
+        Compare lists and show up differences.
+        '''
+        in_use = set(self.__elbs.values())
+        loaded = set(self.__iam_certificates.values())
+
+        exit_code = 0
+        if len(in_use - loaded) == 0 and len(loaded - in_use) == 0:
+            if self.__nagios:
+                print 'IAM Server certificates: OK'
+            else:
+                self.__print('Loaded certificates and in-use certificates are consistent', 1)
+        elif len(in_use - loaded) > 0:
+            if self.__nagios:
+                print 'Missing server certificates in IAM keyring'
+                exit_code = 2
+            else:
+                self.__print('E: There are more certificates in use than loaded', 1)
+            self.__print(',\n'.join(in_use - loaded), 2)
+        else:
+            if self.__nagios:
+                print 'Unused server certificates in IAM'
+                exit_code = 1
+            else:
+                self.__print('W: There are more loaded certificates than in use', 1)
+                if self.__apply or self.__dry_run:
+                    self.__print('Will remove unused certificates', 1)
+                    for cert in loaded - in_use:
+                        name = self.__extract_cert_name(cert)
+                        if self.__apply:
+                            self.__print('Removing %s' % name, 1)
+                            self.__iam_client.delete_server_certificate(
+                                    ServerCertificateName = name
+                                    )
+                        else:
+                            print 'Would remove %s' % name
+
+            if not self.__apply and not self.__dry_run:
+                self.__print(',\n'.join(loaded - in_use), 2)
+        
+        if self.__nagios:
+            sys.exit(exit_code)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Check for unused SSL certificate in IAM keyring.')
+    parser.add_argument('--apply',  action='store_const', const=True, help='Clean up unused IAM server certificates')
+    parser.add_argument('--debug',  '-d', help='Set verbosity level', default=0, type=int)
+    parser.add_argument('--dry-run', '-n', action='store_const', const=True, help='Only show what would have been done')
+    parser.add_argument('--expr', '-e', help='String used in order to target a specific certificate', default='all')
+    parser.add_argument('--nagios', action='store_const', const=True, help='Returns nagios-compatible status')
+    parser.add_argument('--profile', '-p', help='Pass AWS profile name', default='default')
+    parser.add_argument('--region', '-r',   help='Set AWS region', default='eu-west-1')
+    args = parser.parse_args()
+
+    if args.apply and args.nagios:
+        print 'ERROR: cannot apply and return nagios status at the same time!'
+        sys.exit(99)
+
+    worker = iam_server_certificate(
+            apply   = args.apply,
+            debug   = args.debug,
+            dry_run = args.dry_run,
+            expr    = args.expr,
+            nagios  = args.nagios,
+            profile = args.profile,
+            region  = args.region,
+            )
