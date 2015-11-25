@@ -2,13 +2,15 @@
 
 import argparse
 import boto3
+import re
 import sys
 
 class elb_instances:
     def __init__(self, **kwargs):
         self.__debug = kwargs['debug']
         self.__elb = kwargs['load_balancer_name']
-        
+        self.__exclude = kwargs['exclude']
+
         session = boto3.session.Session(
                 profile_name=kwargs['profile'],
                 region_name=kwargs['region']
@@ -57,7 +59,7 @@ class elb_instances:
 
     def get_elbs(self):
         '''
-        Either get all ELBs or just one, depending on script invocation.
+        Either get all ELBs, exclude some, or just get one, depending on script invocation.
         '''
         if self.__elb == 'all':
             self.__print('Getting all ELBs')
@@ -75,20 +77,23 @@ class elb_instances:
                         ),
                     2
                     )
-            attributes = self.__elb_client.describe_load_balancer_attributes(
-                    LoadBalancerName = lb['LoadBalancerName']
-                    )
-            instance_health = self.__elb_client.describe_instance_health(
-                    LoadBalancerName = lb['LoadBalancerName']
-                    )
-            health = {}
-            for ih in instance_health['InstanceStates']:
-                health[ih['InstanceId']] = ih['State']
-            self.__elbs[lb['LoadBalancerName']] = {
-                    'availability': lb['AvailabilityZones'],
-                    'cross': attributes['LoadBalancerAttributes']['CrossZoneLoadBalancing']['Enabled'],
-                    'health': health,
-                    }
+            if self.__exclude.match(lb['LoadBalancerName']):
+                self.__print('ignoring ELB %s because it matches exclude regex' % lb['LoadBalancerName'])
+            else:
+                attributes = self.__elb_client.describe_load_balancer_attributes(
+                        LoadBalancerName = lb['LoadBalancerName']
+                        )
+                instance_health = self.__elb_client.describe_instance_health(
+                        LoadBalancerName = lb['LoadBalancerName']
+                        )
+                health = {}
+                for ih in instance_health['InstanceStates']:
+                    health[ih['InstanceId']] = ih['State']
+                self.__elbs[lb['LoadBalancerName']] = {
+                        'availability': lb['AvailabilityZones'],
+                        'cross': attributes['LoadBalancerAttributes']['CrossZoneLoadBalancing']['Enabled'],
+                        'health': health,
+                        }
 
     def compare_zones(self):
         '''
@@ -137,6 +142,7 @@ if __name__ == '__main__':
     parser.add_argument('--load-balancer-name', '-e',   help='Check only this ELB', default='all')
     parser.add_argument('--profile', '-p', help='Pass AWS profile name', default='default')
     parser.add_argument('--region', '-r',   help='Set AWS region', default='eu-west-1')
+    parser.add_argument('--exclude', '-x',   help='Exclude ELB if its name matches regex', default='IhopeNoOneNamesELBlikeThis')
     args = parser.parse_args()
 
     worker = elb_instances(
@@ -144,6 +150,7 @@ if __name__ == '__main__':
             load_balancer_name = args.load_balancer_name,
             profile = args.profile,
             region = args.region,
+            exclude = re.compile(args.exclude),
             )
     print worker.out_msg
     sys.exit(worker.out_status)
