@@ -19,8 +19,10 @@ class iam_server_certificate:
         session = boto3.session.Session(profile_name=kwargs['profile'], region_name=kwargs['region'])
         self.__iam_client = session.client('iam')
         self.__elb_client = session.client('elb')
+        self.__acm_client = session.client('acm')
 
         self.__iam_certificates = {}
+        self.__acm_certificates = {}
         self.__elbs = {}
 
         self.__get_certificates()
@@ -38,7 +40,7 @@ class iam_server_certificate:
 
     def __get_certificates(self):
         '''
-        Extract certificate names and ARN from IAM
+        Extract certificate names and ARN from IAM and ACM
         '''
         self.__print('Getting server certificates', 2)
         certificates = self.__iam_client.list_server_certificates()
@@ -46,9 +48,20 @@ class iam_server_certificate:
             if (self.__expr != 'all' and self.__matcher.search(certificate['ServerCertificateName'])) or self.__expr == 'all':
                 self.__iam_certificates[certificate['ServerCertificateName']] = certificate['Arn']
                 self.__print(
-                        'Certificate found: %s,\n  ARN: %s' %(
+                        'IAM Certificate found: %s,\n  ARN: %s' %(
                             certificate['ServerCertificateName'],
                             certificate['Arn']
+                        ),
+                        2
+                        )
+        certificates = self.__acm_client.list_certificates()
+        for certificate in certificates['CertificateSummaryList']:
+            if (self.__expr != 'all' and self.__matcher.search(certificate['CertificateArn'])) or self.__expr == 'all':
+                self.__acm_certificates[certificate['DomainName']] = certificate['CertificateArn']
+                self.__print(
+                        'ACM Certificate found: %s,\n  ARN: %s' %(
+                            certificate['DomainName'],
+                            certificate['CertificateArn']
                         ),
                         2
                         )
@@ -80,7 +93,7 @@ class iam_server_certificate:
         Compare lists and show up differences.
         '''
         in_use = set(self.__elbs.values())
-        loaded = set(self.__iam_certificates.values())
+        loaded = set(self.__iam_certificates.values() + self.__acm_certificates.values())
 
         exit_code = 0
         if len(in_use - loaded) == 0 and len(loaded - in_use) == 0:
