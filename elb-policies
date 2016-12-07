@@ -68,10 +68,10 @@ class elb_policies:
                         if len(listener['PolicyNames']) > 0:
                             self.__print('  Found ELB: %s'%loadbalancer['LoadBalancerName'], 1)
                             if len(listener['PolicyNames']) == 1:
-                                if listener['PolicyNames'][0] != self.__policy_name:
+                                if listener['PolicyNames'][0] != self.__policy_name and 'SSLNegotiationPolicy-%s'%listener['PolicyNames'][0] != self.__policy_name:
                                     self.__old_policies.append(loadbalancer)
                                     self.__print('      OLD policy in place!', 1)
-                                    self.__print('      Currently using %s'%listener['PolicyNames'][0], 2)
+                                    self.__print('      Currently using %s, should be %s'%(listener['PolicyNames'][0], self.__policy_name), 2)
                             else:
                                 if self.__policy_name not in listener['PolicyNames']:
                                     self.__print('      %i policies in place!'%len(listener['PolicyNames']), 1)
