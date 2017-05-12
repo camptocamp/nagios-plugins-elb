@@ -118,7 +118,7 @@ class iam_server_certificate:
                     self.__print('Will remove unused certificates', 1)
                     for cert in loaded - in_use:
                         name = self.__extract_cert_name(cert)
-                        if self.__apply:
+                        if self.__apply and not self.__dry_run:
                             self.__print('Removing %s' % name, 1)
                             self.__iam_client.delete_server_certificate(
                                     ServerCertificateName = name
