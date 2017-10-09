@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import requests
 import boto3
 import re
 import sys
@@ -21,6 +22,9 @@ class elb_instances:
 
         self.__elbs = {}
         self.__instances = {}
+        self.__flags = {}
+        if kwargs['flags']:
+            self.__convert_flags(kwargs['flags'])
 
         self.out_status = 0
         self.out_msg = 'ELB: in good state'
@@ -29,6 +33,12 @@ class elb_instances:
         self.get_instances()
         self.compare_zones()
 
+    def __convert_flags(self, string):
+        '''
+        Convert flag string to a hash.
+        '''
+        for flag in string.split(','):
+            self.__flags[flag.split('#')[0]] = flag.split('#')[1]
 
     def __print(self, string, level=1):
         '''
@@ -57,6 +67,21 @@ class elb_instances:
                     'availability': instance['Placement']['AvailabilityZone'],
                     }
 
+    def __get_flag(self, flag):
+        '''
+        Get remote flags and returns its content
+        '''
+        try:
+            rep = requests.get(flag)
+        except requests.exceptions.ConnectionError:
+            self.__print('ConnectionError for %s' % flag)
+            return False
+        if rep.status_code == '200':
+            self.__print('Flag %s contains %s' % (flag, rep.text), 2)
+            return rep.text
+        self.__print('Flag %s returned %i' % (flag, rep.status_code))
+        return False
+
     def get_elbs(self):
         '''
         Either get all ELBs, exclude some, or just get one, depending on script invocation.
@@ -77,8 +102,17 @@ class elb_instances:
                         ),
                     2
                     )
+            ignore = False
+            if lb['LoadBalancerName'] in self.__flags:
+                dflag = self.__get_flag(self.__flags[lb['LoadBalancerName']])
+                if dflag and dflag != 'active':
+                    ignore = True
+
+
             if self.__exclude and re.match(self.__exclude,lb['LoadBalancerName']):
                 self.__print('ignoring ELB %s because it matches exclude regex' % lb['LoadBalancerName'])
+            elif ignore:
+                self.__print('ignoring ELB %s because it is deactivated by remote flag' % lb['LoadBalancerName'])
             else:
                 attributes = self.__elb_client.describe_load_balancer_attributes(
                         LoadBalancerName = lb['LoadBalancerName']
@@ -143,6 +177,7 @@ if __name__ == '__main__':
     parser.add_argument('--profile', '-p', help='Pass AWS profile name', default='default')
     parser.add_argument('--region', '-r',   help='Set AWS region', default='eu-west-1')
     parser.add_argument('--exclude', '-x',   help='Exclude ELB if its name matches regex', default=False)
+    parser.add_argument('--remote-flags', '-R', help='Remote flag for specific ELbs, in the form elb-name#remoteflag,elbname#remoteflag,...', type=str)
     args = parser.parse_args()
 
     worker = elb_instances(
@@ -150,7 +185,8 @@ if __name__ == '__main__':
             load_balancer_name = args.load_balancer_name,
             profile = args.profile,
             region = args.region,
-            exclude = args.exclude
+            exclude = args.exclude,
+            flags = args.remote_flags
             )
     print worker.out_msg
     sys.exit(worker.out_status)
