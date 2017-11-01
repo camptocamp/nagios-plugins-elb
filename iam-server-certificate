@@ -19,6 +19,7 @@ class iam_server_certificate:
         session = boto3.session.Session(profile_name=kwargs['profile'], region_name=kwargs['region'])
         self.__iam_client = session.client('iam')
         self.__elb_client = session.client('elb')
+        self.__elbv2_client = session.client('elbv2')
         self.__acm_client = session.client('acm')
 
         self.__iam_certificates = {}
@@ -84,6 +85,19 @@ class iam_server_certificate:
                                 2
                                 )
                         self.__elbs[lb['LoadBalancerName']] = listener['Listener']['SSLCertificateId']
+        elbv2s = self.__elbv2_client.describe_load_balancers()
+        for elbv2 in elbv2s['LoadBalancers']:
+            listeners = self.__elbv2_client.describe_listeners(LoadBalancerArn=elbv2['LoadBalancerArn'])
+            for listener in listeners['Listeners']:
+                if 'Certificates' in listener:
+                    self.__print('ALB: %s.\n  Certificates:\n    %s' % (
+                        elbv2['LoadBalancerName'],
+                        '\n    '.join([x['CertificateArn'] for x in listener['Certificates']])
+                        ) ,2)
+                    i=0
+                    for cert in listener['Certificates']:
+                        self.__elbs['%s_%int' % (elbv2['LoadBalancerName'], i)] = cert['CertificateArn']
+                        i = i+1
 
     def __extract_cert_name(self, string):
         return string.split('/')[1]
